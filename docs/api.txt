@@ -1,0 +1,354 @@
++ C2RouteApp API, LFUCG Work-Orders
+
+    Copyright 2010, C2Logix, Inc.
+    Version 2010.08.31 awg
+
+!TOC
+
+++ Overview
+
+The C2RouteApp API allows routing of work-orders derived from LexCall. The API is a HTTPS, REST, interface. Discussion of the work-orders is in a separate document[2].
+
+Obtain a base-url and login from C2Logix. Note that this is a HTTPS url, and may specify a non-default port.
+
+Your user-agent must be capable of https, non-default ports, maintaining cookies across a "session", handling redirects, and encoding/decoding json data.
+
+You should validate the SSL-Certificate as part of the HTTPS negotiation.
+
+The following documentation assumes you have a base-url, e.g. https://snstoursolver.c2logix.com.
+
+General order:
+
+* login
+* upload project
+* start routing
+* wait
+* check for completion
+* download results
+
++++ Session
+
+A session starts with a login. The session has no explicit termination (though cookies expire).
+
++++ REST
+
+The API approximates REST.
+
+The C2RouteApp API exchanges data in json format. You must use content-type application/json (except where noted below). The returned data, and POST'd data, is usually application/json, except for file-downloads. All url-paths should end in ".json", except where noted.
+
+If a result looks like html, check that you specified ".json" for the url-path, and content-type application/json.
+
+Success results give a http-status of 200 to 299. GETs will give 200, POSTs may give 201.
+
+Redirects, a http-status in the 300's may occur. You should only see a redirect when a session has expired or when you do not have a valid session cookie.
+
+Failures may give a http-status of 400's or 500's. A 422 indicates that the POST'd data was unacceptable, and the content should give json data explaining why. A 500 indicates that the C2RouteApp API encountered an error: no result content will be available in this case.
+
+Please report all http-status codes in the 500's, and provide the url and data that caused the error. It is desired that the C2RouteApp API should not generate 500 errors. 
+
+The C2Logix RouteApp API should tolerate http 1.0, but 1.1 is strongly preferred.
+
+Sample code is available[3].
+
++++ Projects
+
+C2RouteApp API operates on sets of data called a "project". A project has vehicles, depots, customers, and parameters.
+
+Parameters define various attributes, such as vehicle-capacity, max-run-time, etc. Each of the vehicles, depots, and customers has parameters; as well as the project as a whole. Please refer to other documentation for details of parameters[1].
+
+++ Protocol
+
++++ Login
+
+Login to start a session. Maintain the cookie(s) for subsequent requests. You may re-login as convenient.
+
+	POST /session.json
+	{ 'login' :  'your-user-name',
+		'password' = 'your-password'
+	}
+
+If your login/password is correct, the response will have a cookie, and application/json of:
+
+	{ 'logged_in' : 1 }
+
+If wrong, you will get:
+
+	{ 'logged_in' : 0 }
+
+and other requests will fail.
+
+NB: Cookies will expire, currently in about 15 minutes of inactivity (though this is likely to change).
+
++++ Upload Project
+
+Uploading is a multi-step process:
+
+* Get auth-token
+* Encode project as MS-Excel 2000 file
+* POST the Excel file
+* Check http-status and json result
+* Remember the 'project_id'
+
+++++ Get Auth-Token
+
+You must obtain an auth-token for use in the actual upload:
+
+	GET /projects/new.json
+
+Returns:
+
+	{ 'authentication_token' :  'some string' }
+
+Remember this value for use below.
+
+++++ Encode as MS-Excel 2000
+
+See other document for details[4]. Excel 97/2000/XP should work. Most libraries for programmatic creation of Excel files should work. Examine their documentation carefully to make sure they are not creating a 97/2000/XP version (and not the newer .docx formats).
+ 
+++++ POST Excel
+
+This is one of the few requests that is not of type application/json. It is a standard multipart/form-data. There is a provision to pass arbitrary user-data, retrievable later from the the downloaded-results. 
+
+	POST /projects.json
+	Content-Type: multipart/form-data
+	<authenticity_token>
+	<file>
+
+Provide the authenticity_token that you retrieved earlier:
+
+	Content-Disposition: form-data; name="authenticity_token"
+
+	the-auth-token-from-above
+	
+The file should be:
+
+	Content-Disposition: form-data; name="project[uploaded_data]"; filename="somename.xls"
+	Content-Type: application/vnd.ms-excel
+	...
+
+An arbitrary project name must be provided. It need not be unique, and has no meaning to C2RouteApp API:
+
+	Content-Disposition: form-data; name="project[name]"
+
+	some-project-name
+
+You may specify any other project-parameter(s)[1]. If the spreadsheet provides the same parameter, the spreadsheet's value will override the value provided here.
+
+	Content-Disposition: form-data; name="project[parameter_xxx]"
+
+	some-value
+
+You may specify some arbitrary user-data. C2RouteApp API will ignore this data, but will preserve it and provide it with the later project download. JSON encoded (or your languages native serialization) data is often convenient:
+
+	Content-Disposition: form-data; name="project[parameter_user_data1]"
+
+	some-string
+
++++ 4xx on Bad project_id
+
+Most requests that take a project_id in the url (see below) will return http-status 404 if there is no such project_id.
+
+Most requests that take a project_id in the url will return http-status 422 if that is an inappropriate project_id for the login. The content of the response will have
+	
+	{ 'errors' : "Not owner of projects <project_id>" }
+	
++++ Check HTTP-Status And JSON Result
+
+The success result of the POST should be:
+
+* content-type application/json
+* http-status 201
+* content: { 'project_id' : some-number, 'errors' : null }
+
+Failure should be:
+
+* content-type application/json
+* http-status 422
+* content: { 'project_id' : null, 'errors' : [ [ 'where-string', 'desc-string']...] }
+
+The errors is a list of pairs. Each pair is:
+
+* A "where" that gives a hint about which data is unacceptable.
+* A "desc" that gives a hint about why the data was unacceptable. 
+
+The "where", and description, should be appropriate for presentation to a human, are not canonical, and are subject to change.
+
++++ Remember The 'project_id'
+
+Upon success, remember the project_id for use in later requests.
+
++++ Start Routing
+
+Once upload, a project can be routed any number of times. Though, re-routing is probably pointless unless the previous routing was terminated early.
+
+If you start-routing, it will terminate the route-processing (if any) currently running. Thus, you would typically let route-processing run till completion.
+
+To start routing:
+
+	GET /projects/<project_id>/startroute.json
+
+Note the project_id to be provided in the url.
+
+The result should be:
+
+	{ 'start' : 1, 'error': nil }
+
+Indicating that route-processing has started.
+
+If there is an error that prevents routing, you will see:
+
+	{ 'start' : 0, 'error': 'some hint...' }
+
+Typical errors are:
+
+* Your type of project requires that all submitted locations have a geolocation, and they didn't.
+* You didn't supply at least 1 of each location type, and at least 1 vehicle.
+
+Route-processing can take significant time: hours to days. Experience with your dataset will provide guidance.
+
++++ Wait
+
+You should periodically poll C2RouteApp API to find out if route-processing is finished.
+
++++ Check for Completion
+
+Periodically, poll for completion:
+
+* After start-routing, poll at short intervals until processing has started (see below).
+* Once started, poll at long intervals (based upon experience with your dataset) for completion.
+
+Checking:
+
+	GET projects/<project_id>/query_optimization_status.json
+
+Note the project_id to be provided in the url.
+
+The result should be:
+
+	{
+    'running' : null | true | false,
+    'stopped' : null | 'some string',
+    'status' : 'some string',
+    'elapsed' : 'x days xx:xx:xx'
+    }
+
+Notes:
+
+* 'running' will be null if route-processing wasn't started. This indicates that you did not start-routing, or the C2RouteApp API somehow lost track of the processing (a bug). The value of 'running' really means "route-processing was/is running/ran if not null".
+* If 'running' is null, the other values aren't relevant. However, 'status' may have a hint.
+* 'stopped' gives a human-description if the processing was stopped abnormally. Otherwise, it is null.
+* 'elapsed' is a human readable string of how long route-processing has been running.
+* 'status' is a string:
+
+      "undefined"  # waiting to start
+      "waiting"    # Waiting for a node available for processing.
+      "running"    # running : Optmization process is running
+      "terminated" # terminated : done
+      "error"      # error : Error, optimization failed
+      "idle" # idle, shouldn't see this
+      other # other explanatory values if 'running' is null
+
+Route-processing has started when 'status' changes from 'undefined'. You should poll at a relatively short interval (30-60 seconds) to ascertain that routing has either started, or failed early.
+
+Once started, ('waiting', 'running', etc.), poll at a relatively long interval, such as 15 minutes or more.
+
+Processing is done when the status is one of:
+
+	terminated
+	error
+
+Check the 'stopped' for the error reason. Always check the 'stopped' to see if there was a premature termination (normal termination will have a 'stopped' of null).
+
++++ Kill Route-Processing
+
+It is possible to terminate route-processing:
+
+	GET /projects/<project_id>/stop_by_id.json
+
+The result is the same as "Check for Completion" above.
+
+Note that termination may not happen immediately. You may poll until 'status' indicates termination, or simply assume it will terminate.
+
++++ Download Results
+
+You may wish to retrieve the user-data (as supplied in the POST'ing of the Excel file) before downloading the file (e.g. to get your target directory, internal id, etc.):
+
+	GET /projects/<project_id>/project_info.json?parameter[user_data1]
+
+The result is:
+	{ 
+	'name' : 'the project name', 
+	'error' : null,
+	'user_data1' : 'your string'
+	}
+
+Note that 'name' will be null if the project_id is not valid (i.e. doesn't exist).
+
+Note that the user_data1 is also provided in the downloaded spreadsheet, on the default_parameters "sheet".
+
+Downloading the project with routing results:
+
+	GET /projects/<project_id>/save_by_id
+	--- no content-type json --
+
+Note the lack of ".json".
+
+This is one of the few requests that is not of content-type application/json.
+
+The result is application/octet-stream, consisting of a Excel 2000 compatible spreadsheet (as per the spec for uploading). Note that the Excel file is constructed by a third-party library. Please report any issues.
+
+The routing information is on the "sheet" called "Route"[4].
+
+It is desirable for you to capture the geocoding for the depots, and customers, as it takes considerable time to geocode addresses each time you upload a project. The latitude/longitude will have values when you download the results, except where the geocoding can not be determined.
+
+NB: If a location can't be geocoded, it will not be included in the routing. Presumably, you would wish to take remedial action.
+
+NB: Failure to geocode a depot may be serious.
+			
++++ Check for Project
+
+You may check to see if a project_id is valid:
+
+	GET /projects/<project_id>/project_info.json
+
+If the project_id is valid, the result is:
+
+	{ 'name' : 'the project name', 'error' : null }
+
+If the project_id is not valid (i.e. no such project), the result is:
+
+	{ 'name' : null, 'error' : 'No such project' }
+
+You should only rely on 'name' being null or not-null to detect validity.
+
+As hinted above, you may retrieve any project-parameter through this request. Add an empty query-param(s) to indicate the params you wish. See above for an example that gets the 'user_data1' parameter.
+
+++ Semantics
+
+This section needs to be written. It will explain the use of values/parameters/etc. for work-order routing.[5]
+
+++ Performance Notes
+
+C2RouteApp will attempt to geocode locations that are lacking a latitude or longitude. This can take considerable time; as well, since there is no user feedback, the inherent limitations of automatic geocoding may lead to less than ideal location guesses.
+
+++ Notes
+
+Please report mis-behaviors, incorrect documentation, missing functionality, and inconvenient parts of the API to support@c2logix.com (or your technical contact). No doubt the API can be improved.
+	
+++ TBD
+
+* How long do projects remain in RouteApp? Are they deletable?
+* Allow xml in addition to json?
+* Provide current "efficiency" from route-processing?
+During route-processing, an "efficiency" value is available within RouteApp. It is an arbitrary number, lower-is-better, that changes as processing proceeds. The magnitude, and rate of change, gives a hint as to the progress and time-to-run. This value is not currently provided through the API. Contact C2Logix to discuss.
+* Signal the caller when optimization finishes?
+* routing errors/unplanned etc. aren't reported?
+* Really HTTPS?
+* Self-signed SSL Cert?
+
+
+[1] See C2RouteApp_API_project_template.xls, "DefaultParameters" tab.
+[2] See work-orders-document.
+[3] Sample code, in the form of a library module, in python, is available. Contact C2Logix.
+[4] See documentation for spreadsheet format: C2RouteApp_API_project_template.xls.
+[5] Write semantics section.
